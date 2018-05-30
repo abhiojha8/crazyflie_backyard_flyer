@@ -1,9 +1,7 @@
 # CrazyFlie Backyard Flyer
-***TODO: Add a pic here!***
-
 In this project, I have set up a state machine using event-driven programming to autonomously fly a drone. Initially I tested on a quadcopter in Unity [simulator](https://github.com/udacity/FCND-Simulator-Releases/releases) provided by Udacity.
 
-The python code is similar to how the drone would be controlled from a ground station computer or an onboard flight computer. Since communication with the drone is done using MAVLink, I was able to use this code to control an PX4 quadcopter autopilot with very little modification!
+The python code is similar to how the drone would be controlled from a ground station computer or an onboard flight computer. Since communication with the drone is done using Mavlink, I was able to use this code to control an PX4 quadcopter autopilot with very little modification!
 
 ## Setting up Python Environment
 I have used Python 3 along with the following packages:
@@ -95,7 +93,6 @@ class BackyardFlyer(Drone):
         self.register_callback(MsgID.LOCAL_POSITION, self.local_position_callback)
         self.register_callback(MsgID.LOCAL_VELOCITY, self.velocity_callback)
         self.register_callback(MsgID.STATE, self.state_callback)
-
 ```
 
 Since callback functions are only called when certain drone attributes are changed, the first parameter to the callback registration indicates for which attribute changes we want the callback to occur.  For example, here are some message id's that are useful for code implementation (for a more detailed list, see the UdaciDrone API documentation):
@@ -243,9 +240,106 @@ The simulation results can be seen here
 
 
 
+## CrazyFlie Integration
+
+The CrazyFlie is able to be controlled (to an extent) through the Udacidrone API. 
+
+I made 3 sets of modifications to our backyard flyer script to be able to control our crazyflie: 
+
+1. Updated the connection
+2. Modified arming and disarming flow
+3. Updated Waypoints
+
+### 1. Connection update
+
+The default firmware of crazyflie uses it's own communication protocol, Crazy RealTime Protocol (CRTP), instead of Mavlink, therefore I changed to using the `CrazyflieConnection` that can be found in Udacidrone starting with version 0.3.0.
+
+1. Add an import for `CrazyflieConnection`
+
+```python
+from udacidrone.connection import CrazyflieConnection
+```
+
+2. At the bottom of the `backyard_flyer.py` script, I have replaced my connection object
+
+```python
+# replace 
+conn = MavlinkConnection('tcp:{0}:{1}'.format(args.host, args.port))
+
+# with
+conn = CrazyflieConnection('radio://0/80/2M')
+```
+
+This creates a connection to the crazyflie. The input string is the URI of the crazyflie, which is defined as a string formatted as `'radio://interface id/interface channel/interface speed`. For this setup, I have kept the default interface id and interface channel, but have increased the speed from the default value of `250K` to `2M`, which can be adjusted through the crazyflie desktop client. 
+
+###2. Modify Arming and Disarming
+
+Since crazyflie does not support `armed` and `guided` modes, I have modified those parts of the script. Furthermore, the concept of state for crazyflie is different from the simulator or PX4. As a result, the `state_callback()` callback is never called! Since the state callback was responsible for takeoff transition, I have modified another one of the callbacks for that purpose. 
+
+##### Arming / Takeoff
+
+I have augmented the local position callback with code that issues takeoff command as and when required.
+
+```python
+def local_position_callback(self):
+        if self.flight_state == States.MANUAL:
+            self.takeoff_transition()
+        if self.flight_state == States.TAKEOFF:
+            if -1.0 * self.local_position[2] > 0.95 * self.target_position[2]:
+                self.all_waypoints = self.calculate_box()
+                self.waypoint_transition()
+        elif self.flight_state == States.WAYPOINT:
+            if np.linalg.norm(self.target_position[0:2] - self.local_position[0:2]) < 1.0:
+                if len(self.all_waypoints) > 0:
+                    self.waypoint_transition()
+                else:
+                    if np.linalg.norm(self.local_velocity[0:2]) < 1.0:
+                        self.landing_transition()
+```
+
+ On receiving the first local position message the takeoff command is issued. 
+
+##### Disarming / Ending Mission
+
+With no `armed` and `guided` information, we don't know when to consider the flight complete and the mission over. Thus, I have used the landing condition as the end of the flight. The `velocity_callback()` is modified for this purpose.
+
+```python
+def velocity_callback(self):
+    if self.flight_state == States.LANDING:
+        if abs(self.local_position[2] < 0.01):
+            self.manual_transition()
+```
+
+Note that manual transition function is used as it contains the code to consider the flight as completed and stops the connection and the script.
+
+### 3. Update Waypoints
+
+For Crazyflie, I modified the coordinates of the box to take into account the position of the drone at takeoff. The `calculate_box()` function is modified as follows:
+
+```python
+def calculate_box(self):
+    cp = self.local_position
+    cp[2] = 0
+    local_waypoints = [cp + [1.0, 0.0, 0.5], cp + [1.0, 1.0, 0.5], cp + [0.0, 1.0, 0.5], cp + [0.0, 0.0, 0.5]]
+    return local_waypoints
+```
+
+Since I will be testing the crazyflie in an indoor environment, I changed the altitude to 0.5 m from 3 m.
+
+### Time to Fly!
+
+1. Turn on the crazyflie and place it on the ground.
+
+2. Plug in the CrazyRadio in the computer.
+
+3. Activate the python environment and run the script
+
+   ```sh
+   python backyard_flyer_crazyflie.py
+   ```
 
 
 
+## Acknowledgements
 
-
-
+I would like to thank Udacity for their awesome Flying Car Nanodegree. If you are unaware about it, please click [here](https://in.udacity.com/course/flying-car-nanodegree--nd787). With regards to this project, Udacity has designed the simulator, Udacidrone API and given some skeleton code to work with. Also all the topics related to event driven programming and drone integration were taught in class. 
